@@ -59,6 +59,137 @@ function validateAndNormalizePatient(patient: any): any {
   };
 }
 
+// Risk Scoring Functions
+interface BloodPressureReading {
+  systolic: number | null;
+  diastolic: number | null;
+  isValid: boolean;
+}
+
+function parseBloodPressure(bpString: string): BloodPressureReading {
+  if (!bpString || bpString === 'N/A' || bpString.trim() === '') {
+    return { systolic: null, diastolic: null, isValid: false };
+  }
+
+  // Handle various formats: "120/80", "150/", "/90", "INVALID", etc.
+  const parts = bpString.split('/');
+  
+  if (parts.length !== 2) {
+    return { systolic: null, diastolic: null, isValid: false };
+  }
+
+  const systolic = parts[0]?.trim() || '';
+  const diastolic = parts[1]?.trim() || '';
+
+  // Check if either part is empty or non-numeric
+  if (systolic === '' || diastolic === '' || 
+      isNaN(Number(systolic)) || isNaN(Number(diastolic))) {
+    return { systolic: null, diastolic: null, isValid: false };
+  }
+
+  return {
+    systolic: Number(systolic),
+    diastolic: Number(diastolic),
+    isValid: true
+  };
+}
+
+function calculateBloodPressureRisk(bpString: string): number {
+  const bp = parseBloodPressure(bpString);
+  
+  if (!bp.isValid || bp.systolic === null || bp.diastolic === null) {
+    return 0; // Invalid/Missing Data
+  }
+
+  const systolic = bp.systolic;
+  const diastolic = bp.diastolic;
+
+  // Determine risk stage for each component
+  let systolicStage = 0;
+  let diastolicStage = 0;
+
+  // Systolic stages
+  if (systolic < 120) systolicStage = 1; // Normal
+  else if (systolic >= 120 && systolic <= 129) systolicStage = 2; // Elevated
+  else if (systolic >= 130 && systolic <= 139) systolicStage = 3; // Stage 1
+  else if (systolic >= 140) systolicStage = 4; // Stage 2
+
+  // Diastolic stages
+  if (diastolic < 80) diastolicStage = 1; // Normal
+  else if (diastolic >= 80 && diastolic <= 89) diastolicStage = 3; // Stage 1
+  else if (diastolic >= 90) diastolicStage = 4; // Stage 2
+
+  // Use the higher risk stage
+  return Math.max(systolicStage, diastolicStage);
+}
+
+function calculateTemperatureRisk(temp: number | string): number {
+  if (temp === null || temp === undefined || temp === '') {
+    return 0; // Invalid/Missing Data
+  }
+
+  const temperature = typeof temp === 'number' ? temp : parseFloat(temp.toString());
+  
+  if (isNaN(temperature)) {
+    return 0; // Invalid/Missing Data
+  }
+
+  if (temperature <= 99.5) return 0; // Normal
+  if (temperature >= 99.6 && temperature <= 100.9) return 1; // Low Fever
+  if (temperature >= 101.0) return 2; // High Fever
+  
+  return 0;
+}
+
+function calculateAgeRisk(age: number | string): number {
+  if (age === null || age === undefined || age === '') {
+    return 0; // Invalid/Missing Data
+  }
+
+  const ageNum = typeof age === 'number' ? age : parseInt(age.toString());
+  
+  if (isNaN(ageNum)) {
+    return 0; // Invalid/Missing Data
+  }
+
+  if (ageNum < 40) return 1; // Under 40
+  if (ageNum >= 40 && ageNum <= 65) return 1; // 40-65
+  if (ageNum > 65) return 2; // Over 65
+  
+  return 0;
+}
+
+function calculatePatientRisk(patient: any): {
+  patient_id: string;
+  totalRisk: number;
+  bpRisk: number;
+  tempRisk: number;
+  ageRisk: number;
+  hasDataQualityIssues: boolean;
+} {
+  const bpRisk = calculateBloodPressureRisk(patient.blood_pressure);
+  const tempRisk = calculateTemperatureRisk(patient.temperature);
+  const ageRisk = calculateAgeRisk(patient.age);
+  
+  const totalRisk = bpRisk + tempRisk + ageRisk;
+  
+  // Check for data quality issues
+  const bp = parseBloodPressure(patient.blood_pressure);
+  const temp = typeof patient.temperature === 'number' ? patient.temperature : parseFloat(patient.temperature);
+  const age = typeof patient.age === 'number' ? patient.age : parseInt(patient.age);
+  
+  const hasDataQualityIssues = !bp.isValid || isNaN(temp) || isNaN(age);
+  
+  return {
+    patient_id: patient.patient_id,
+    totalRisk,
+    bpRisk,
+    tempRisk,
+    ageRisk,
+    hasDataQualityIssues
+  };
+}
+
 async function fetchAllPatients(limit: number = 5): Promise<any[]> {
   let patients: any[] = [];
   let page = 1;
@@ -105,13 +236,105 @@ async function fetchAllPatients(limit: number = 5): Promise<any[]> {
   return patients;
 }
 
-// Main execution with enhanced error handling and data analysis
+// Generate Alert Lists
+function generateAlertLists(patients: any[]): {
+  high_risk_patients: string[];
+  fever_patients: string[];
+  data_quality_issues: string[];
+} {
+  const highRiskPatients: string[] = [];
+  const feverPatients: string[] = [];
+  const dataQualityIssues: string[] = [];
+
+  patients.forEach(patient => {
+    const risk = calculatePatientRisk(patient);
+    
+    // High-risk patients (total risk score >= 4)
+    if (risk.totalRisk >= 4) {
+      highRiskPatients.push(patient.patient_id);
+    }
+    
+    // Fever patients (temperature >= 99.6°F)
+    const temp = typeof patient.temperature === 'number' ? patient.temperature : parseFloat(patient.temperature);
+    if (!isNaN(temp) && temp >= 99.6) {
+      feverPatients.push(patient.patient_id);
+    }
+    
+    // Data quality issues
+    if (risk.hasDataQualityIssues) {
+      dataQualityIssues.push(patient.patient_id);
+    }
+  });
+
+  return {
+    high_risk_patients: highRiskPatients,
+    fever_patients: feverPatients,
+    data_quality_issues: dataQualityIssues
+  };
+}
+
+// Test the scoring logic with sample data
+function testScoringLogic() {
+  console.log('=== TESTING RISK SCORING LOGIC ===');
+  
+  const testPatients = [
+    { patient_id: 'TEST001', blood_pressure: '120/80', temperature: 98.6, age: 45 },
+    { patient_id: 'TEST002', blood_pressure: '140/90', temperature: 99.8, age: 70 },
+    { patient_id: 'TEST003', blood_pressure: '150/', temperature: 101.2, age: 30 },
+    { patient_id: 'TEST004', blood_pressure: 'N/A', temperature: 'invalid', age: 'unknown' },
+    { patient_id: 'TEST005', blood_pressure: '130/85', temperature: 100.5, age: 55 }
+  ];
+
+  testPatients.forEach(patient => {
+    const risk = calculatePatientRisk(patient);
+    console.log(`Patient ${patient.patient_id}:`);
+    console.log(`  BP: ${patient.blood_pressure} (Risk: ${risk.bpRisk})`);
+    console.log(`  Temp: ${patient.temperature} (Risk: ${risk.tempRisk})`);
+    console.log(`  Age: ${patient.age} (Risk: ${risk.ageRisk})`);
+    console.log(`  Total Risk: ${risk.totalRisk}`);
+    console.log(`  Data Quality Issues: ${risk.hasDataQualityIssues}`);
+    console.log('');
+  });
+}
+
+// Submit assessment results
+async function submitAssessment(alertLists: {
+  high_risk_patients: string[];
+  fever_patients: string[];
+  data_quality_issues: string[];
+}): Promise<void> {
+  const SUBMIT_URL = "https://assessment.ksensetech.com/api/submit-assessment";
+  
+  try {
+    console.log('=== SUBMITTING ASSESSMENT ===');
+    console.log('Submitting alert lists:', JSON.stringify(alertLists, null, 2));
+    
+    const response = await axios.post(SUBMIT_URL, alertLists, {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY
+      }
+    });
+    
+    console.log('✅ Assessment submitted successfully!');
+    console.log('Response:', JSON.stringify(response.data, null, 2));
+    
+  } catch (error: any) {
+    console.error('❌ Failed to submit assessment:', error.response?.data || error.message);
+    throw error;
+  }
+}
+
+// Main execution with risk scoring and alert generation
 (async () => {
   try {
-    console.log('=== Healthcare Assessment - Patient Data Fetching ===');
+    console.log('=== Healthcare Assessment - Risk Scoring System ===');
     console.log(`Using API Key: ${API_KEY.substring(0, 10)}...`);
     console.log(`Base URL: ${BASE_URL}`);
     console.log('');
+
+    // Test scoring logic first
+    testScoringLogic();
 
     const patients = await fetchAllPatients(5); // fetch 5 per page
     
@@ -120,33 +343,47 @@ async function fetchAllPatients(limit: number = 5): Promise<any[]> {
     console.log(`✅ Successfully fetched ${patients.length} patients`);
     
     if (patients.length > 0) {
+      // Calculate risk scores for all patients
+      const patientRisks = patients.map(patient => ({
+        ...patient,
+        risk: calculatePatientRisk(patient)
+      }));
+
       console.log('');
-      console.log('=== SAMPLE PATIENT DATA ===');
-      console.log(JSON.stringify(patients.slice(0, 2), null, 2));
+      console.log('=== RISK ANALYSIS ===');
+      const riskDistribution = patientRisks.reduce((acc, p) => {
+        const risk = p.risk.totalRisk;
+        acc[risk] = (acc[risk] || 0) + 1;
+        return acc;
+      }, {} as Record<number, number>);
+      
+      console.log('Risk Score Distribution:', riskDistribution);
+      
+      // Generate alert lists
+      const alertLists = generateAlertLists(patients);
       
       console.log('');
-      console.log('=== DATA ANALYSIS ===');
-      const ageStats = patients.reduce((acc, p) => {
-        acc.total += p.age;
-        acc.count++;
-        if (p.age > acc.max) acc.max = p.age;
-        if (p.age < acc.min) acc.min = p.age;
-        return acc;
-      }, { total: 0, count: 0, max: 0, min: 999 });
+      console.log('=== ALERT LISTS ===');
+      console.log(`High-Risk Patients (≥4): ${alertLists.high_risk_patients.length} patients`);
+      console.log(`  IDs: ${alertLists.high_risk_patients.join(', ')}`);
       
-      console.log(`Average age: ${(ageStats.total / ageStats.count).toFixed(1)}`);
-      console.log(`Age range: ${ageStats.min} - ${ageStats.max}`);
+      console.log(`Fever Patients (≥99.6°F): ${alertLists.fever_patients.length} patients`);
+      console.log(`  IDs: ${alertLists.fever_patients.join(', ')}`);
       
-      const genderCount = patients.reduce((acc, p) => {
-        acc[p.gender] = (acc[p.gender] || 0) + 1;
-        return acc;
-      }, {} as Record<string, number>);
+      console.log(`Data Quality Issues: ${alertLists.data_quality_issues.length} patients`);
+      console.log(`  IDs: ${alertLists.data_quality_issues.join(', ')}`);
       
-      console.log(`Gender distribution:`, genderCount);
+      console.log('');
+      console.log('=== SUBMISSION READY ===');
+      console.log('Alert lists ready for submission:');
+      console.log(JSON.stringify(alertLists, null, 2));
+      
+      // Uncomment the line below to submit the assessment
+      // await submitAssessment(alertLists);
     }
     
   } catch (err) {
-    console.error("❌ Failed to fetch patients:", err);
+    console.error("❌ Failed to process patients:", err);
     process.exit(1);
   }
 })();
