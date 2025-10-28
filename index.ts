@@ -104,23 +104,26 @@ function calculateBloodPressureRisk(bpString: string): number {
   const systolic = bp.systolic;
   const diastolic = bp.diastolic;
 
-  // Determine risk stage for each component
-  let systolicStage = 0;
-  let diastolicStage = 0;
-
-  // Systolic stages
-  if (systolic < 120) systolicStage = 1; // Normal
-  else if (systolic >= 120 && systolic <= 129) systolicStage = 2; // Elevated
-  else if (systolic >= 130 && systolic <= 139) systolicStage = 3; // Stage 1
-  else if (systolic >= 140) systolicStage = 4; // Stage 2
-
-  // Diastolic stages
-  if (diastolic < 80) diastolicStage = 1; // Normal
-  else if (diastolic >= 80 && diastolic <= 89) diastolicStage = 3; // Stage 1
-  else if (diastolic >= 90) diastolicStage = 4; // Stage 2
-
-  // Use the higher risk stage
-  return Math.max(systolicStage, diastolicStage);
+  // Apply the exact criteria from the assessment
+  // Normal (Systolic <120 AND Diastolic <80): 1 point
+  if (systolic < 120 && diastolic < 80) {
+    return 1;
+  }
+  // Elevated (Systolic 120‑129 AND Diastolic <80): 2 points
+  else if (systolic >= 120 && systolic <= 129 && diastolic < 80) {
+    return 2;
+  }
+  // Stage 1 (Systolic 130‑139 OR Diastolic 80‑89): 3 points
+  else if ((systolic >= 130 && systolic <= 139) || (diastolic >= 80 && diastolic <= 89)) {
+    return 3;
+  }
+  // Stage 2 (Systolic ≥140 OR Diastolic ≥90): 4 points
+  else if (systolic >= 140 || diastolic >= 90) {
+    return 4;
+  }
+  
+  // Fallback - shouldn't reach here with valid data
+  return 1;
 }
 
 function calculateTemperatureRisk(temp: number | string): number {
@@ -173,12 +176,21 @@ function calculatePatientRisk(patient: any): {
   
   const totalRisk = bpRisk + tempRisk + ageRisk;
   
-  // Check for data quality issues
+  // Check for data quality issues - be more comprehensive
   const bp = parseBloodPressure(patient.blood_pressure);
   const temp = typeof patient.temperature === 'number' ? patient.temperature : parseFloat(patient.temperature);
   const age = typeof patient.age === 'number' ? patient.age : parseInt(patient.age);
   
-  const hasDataQualityIssues = !bp.isValid || isNaN(temp) || isNaN(age);
+  // Data quality issues: invalid BP, invalid temp, invalid age, or missing values
+  const hasDataQualityIssues = !bp.isValid || 
+                              isNaN(temp) || 
+                              isNaN(age) || 
+                              patient.blood_pressure === 'N/A' || 
+                              patient.blood_pressure === '' ||
+                              patient.temperature === 'N/A' ||
+                              patient.temperature === '' ||
+                              patient.age === 'N/A' ||
+                              patient.age === '';
   
   return {
     patient_id: patient.patient_id,
@@ -198,7 +210,23 @@ async function fetchAllPatients(limit: number = 5): Promise<any[]> {
 
   console.log('Starting to fetch all patients...');
 
-  while (hasNext && page <= totalPages) {
+  // First, get the total pages from the first request
+  try {
+    const firstResponse = await axios.get(BASE_URL, {
+      headers: { "x-api-key": API_KEY },
+      params: { page: 1, limit },
+    });
+    
+    if (firstResponse.data && firstResponse.data.pagination) {
+      totalPages = firstResponse.data.pagination.totalPages || 1;
+      console.log(`Total pages to fetch: ${totalPages}`);
+    }
+  } catch (error: any) {
+    console.error('Failed to get pagination info:', error.message);
+    return patients;
+  }
+
+  while (page <= totalPages) {
     try {
       console.log(`Fetching page ${page}/${totalPages}...`);
       
@@ -208,27 +236,17 @@ async function fetchAllPatients(limit: number = 5): Promise<any[]> {
       const normalizedPatients = pageData.map(validateAndNormalizePatient);
       patients.push(...normalizedPatients);
       
-      // Get pagination info from the API response
-      const response = await axios.get(BASE_URL, {
-        headers: { "x-api-key": API_KEY },
-        params: { page, limit },
-      });
-      
-      const pagination = response.data.pagination;
-      totalPages = pagination?.totalPages || totalPages;
-      hasNext = pagination?.hasNext || false;
-      
       console.log(`Page ${page} completed. Total patients so far: ${patients.length}`);
       
       page++;
       
       // Add a small delay between requests to avoid rate limiting
-      await sleep(100);
+      await sleep(200);
       
     } catch (error: any) {
       console.error(`Failed to fetch page ${page}:`, error.message);
-      // If we can't fetch a page, we'll stop here
-      break;
+      // Continue to next page instead of breaking
+      page++;
     }
   }
 
@@ -254,7 +272,7 @@ function generateAlertLists(patients: any[]): {
       highRiskPatients.push(patient.patient_id);
     }
     
-    // Fever patients (temperature >= 99.6°F)
+    // Fever patients (temperature >= 99.6°F) - be more comprehensive
     const temp = typeof patient.temperature === 'number' ? patient.temperature : parseFloat(patient.temperature);
     if (!isNaN(temp) && temp >= 99.6) {
       feverPatients.push(patient.patient_id);
@@ -282,7 +300,9 @@ function testScoringLogic() {
     { patient_id: 'TEST002', blood_pressure: '140/90', temperature: 99.8, age: 70 },
     { patient_id: 'TEST003', blood_pressure: '150/', temperature: 101.2, age: 30 },
     { patient_id: 'TEST004', blood_pressure: 'N/A', temperature: 'invalid', age: 'unknown' },
-    { patient_id: 'TEST005', blood_pressure: '130/85', temperature: 100.5, age: 55 }
+    { patient_id: 'TEST005', blood_pressure: '130/85', temperature: 100.5, age: 55 },
+    { patient_id: 'TEST006', blood_pressure: '115/75', temperature: 98.4, age: 35 },
+    { patient_id: 'TEST007', blood_pressure: '125/82', temperature: 99.7, age: 68 }
   ];
 
   testPatients.forEach(patient => {
@@ -378,8 +398,7 @@ async function submitAssessment(alertLists: {
       console.log('Alert lists ready for submission:');
       console.log(JSON.stringify(alertLists, null, 2));
       
-      // Uncomment the line below to submit the assessment
-      // await submitAssessment(alertLists);
+      await submitAssessment(alertLists);
     }
     
   } catch (err) {
